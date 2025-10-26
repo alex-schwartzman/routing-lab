@@ -1,0 +1,5 @@
+# Rsnapshot automated backups
+# Runs at midnight daily, keeps 30 days of backups
+
+# Run pre-backup script and daily backup at midnight
+0 0 * * * root /usr/local/bin/pre-backup-script.sh && /usr/bin/rsnapshot daily 2>&1 | logger -t rsnapshot

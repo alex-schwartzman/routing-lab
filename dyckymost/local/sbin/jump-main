@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+#
+# jump-main: Add policy routing rules for local interface subnets
+# Usage: jump-main <interface>
+#
+# Ensures traffic to local subnets uses the main routing table,
+# preventing redirection to tailscale/prague tables.
+#
+
+set -e
+
+IFACE="$1"
+
+if [ -z "$IFACE" ]; then
+    echo "Usage: $0 <interface>" >&2
+    exit 1
+fi
+
+# Get subnet for this interface (e.g., 192.168.68.0/24)
+SUBNET=$(ip route show dev "$IFACE" 2>/dev/null | awk "/proto kernel/ {print \$1}" | head -1)
+
+if [ -z "$SUBNET" ]; then
+    echo "No subnet found for interface $IFACE" >&2
+    exit 0
+fi
+
+echo "Processing interface $IFACE with subnet $SUBNET"
+
+# Add policy rule: traffic TO this subnet uses main table (priority 100)
+if ! ip rule show | grep -q "to $SUBNET lookup main"; then
+    ip rule add from 0.0.0.0/0 to "$SUBNET" lookup main priority 100
+    echo "Added policy rule: to $SUBNET lookup main"
+else
+    echo "Policy rule already exists: to $SUBNET lookup main"
+fi
+
+# Ensure route exists in main table (fallback, usually kernel adds it)
+if ! ip route show table main | grep -q "$SUBNET"; then
+    ip route add "$SUBNET" dev "$IFACE" proto static metric 50 table main
+    echo "Added route in main table: $SUBNET dev $IFACE"
+else
+    echo "Route already exists in main table: $SUBNET dev $IFACE"
+fi
+
+exit 0

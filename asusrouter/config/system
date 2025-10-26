@@ -1,0 +1,44 @@
+
+config system
+	option hostname 'asusrouter'
+	option ttylogin '0'
+	option log_size '64'
+	option urandom_seed '0'
+	option compat_version '1.1'
+	option zonename 'Europe/Prague'
+	option log_proto 'udp'
+	option conloglevel '8'
+	option cronloglevel '5'
+	option timezone 'CET-1CEST,M3.5.0,M10.5.0/3'
+
+config timeserver 'ntp'
+	list server '0.openwrt.pool.ntp.org'
+	list server '1.openwrt.pool.ntp.org'
+	list server '2.openwrt.pool.ntp.org'
+	list server '3.openwrt.pool.ntp.org'
+	option use_dhcp '0'
+
+config led 'led_usb'
+	option name 'USB'
+	option sysfs 'blue:usb'
+	option trigger 'netdev'
+	list port 'usb1-port2'
+	option dev 'surfshark0'
+	list mode 'tx'
+
+config led 'led_wlan2g'
+	option name 'WiFi 2.4GHz'
+	option sysfs 'mt76-phy0'
+	option trigger 'phy0tpt'
+
+config led 'led_wlan5g'
+	option name 'WiFi 5GHz'
+	option sysfs 'mt76-phy1'
+	option trigger 'phy1tpt'
+
+config led
+	option name 'cpu-load'
+	option sysfs 'blue:power'
+	option trigger 'heartbeat'
+	option inverted '1'
+

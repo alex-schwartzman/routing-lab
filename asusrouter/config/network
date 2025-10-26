@@ -1,0 +1,73 @@
+
+config interface 'loopback'
+	option device 'lo'
+	option proto 'static'
+	option ipaddr '127.0.0.1'
+	option netmask '255.0.0.0'
+
+config globals 'globals'
+	option packet_steering '1'
+
+config device
+	option name 'br-lan'
+	option type 'bridge'
+	list ports 'lan1'
+	list ports 'lan2'
+	list ports 'lan3'
+
+config interface 'lan'
+	option device 'br-lan'
+	option proto 'static'
+	option ipaddr '192.168.10.1'
+	option netmask '255.255.255.0'
+	option ipv6 '0'
+
+config interface 'wan'
+	option device 'wan'
+	option proto 'dhcp'
+	option ipv6 '0'
+	option peerdns '0'
+	list dns '8.8.8.8'
+	list dns '1.1.1.1'
+	list dns_search 'cz'
+	list dns_search 'tail55bdec.ts.net'
+	list dns_search 'localnet'
+	option metric '1'
+
+config rule
+	option name 'ssh_back_to_lan'
+	option src 'lan'
+	option src_ip '192.168.10.1'
+	option dest 'lan'
+	option dest_ip '192.168.10.0/24'
+	option lookup 'main'
+	option priority '49'
+
+config rule
+	option name 'lan_to_router_ssh'
+	option src 'lan'
+	option src_ip '192.168.10.0/24'
+	option dest 'lan'
+	option dest_ip '192.168.10.1'
+	option lookup 'main'
+	option priority '50'
+
+config interface 'surfshark0'
+	option proto 'wireguard'
+	option private_key '****************************************' # REDACTED
+	list addresses '10.14.0.2/16'
+	list dns '162.252.172.57'
+	list dns '149.154.159.92'
+	option metric '2'
+
+config wireguard_surfshark0
+	option description 'Imported peer configuration'
+	option public_key 'c1bfP+OBTj6WUe8NDH8d6nDTwpQicopfdkHFx3BIaSk='
+	list allowed_ips '0.0.0.0/0'
+	option endpoint_host 'cz-prg.prod.surfshark.com'
+	option endpoint_port '51820'
+
+config rule
+	option in 'lan'
+	option out 'surfshark0'
+

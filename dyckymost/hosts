@@ -1,0 +1,12 @@
+127.0.0.1	localhost
+::1		localhost ip6-localhost ip6-loopback
+ff02::1		ip6-allnodes
+ff02::2		ip6-allrouters
+100.112.56.95   decin
+
+192.168.54.1 dyckymost.raspinet
+
+# Local network hostnames
+192.168.54.1    dyckymost.raspinet dyckymost
+192.168.68.1    dyckymost-eth1.raspinet
+192.168.1.38    dyckymost-eth0

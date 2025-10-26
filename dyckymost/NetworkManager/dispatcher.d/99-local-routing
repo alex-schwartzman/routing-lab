@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+#
+# NetworkManager dispatcher script
+# Handles local subnet routing for eth1 and wlan0
+#
+# Arguments:
+#   $1: interface name (e.g., eth1, wlan0)
+#   $2: action (up, down, dhcp4-change, etc.)
+#
+
+IFACE="$1"
+ACTION="$2"
+
+# Log to syslog
+logger -t nm-dispatcher "99-local-routing: $IFACE $ACTION"
+
+# Only process specific interfaces
+case "$IFACE" in
+    eth1|wlan0)
+        ;;
+    *)
+        # Not interested in this interface
+        exit 0
+        ;;
+esac
+
+# Handle actions
+case "$ACTION" in
+    up|dhcp4-change)
+        # Interface came up or got new DHCP lease
+        logger -t nm-dispatcher "99-local-routing: Configuring routes for $IFACE"
+        /usr/local/sbin/jump-main "$IFACE"
+        ;;
+    down)
+        # Interface went down - cleanup handled automatically by kernel
+        logger -t nm-dispatcher "99-local-routing: Interface $IFACE went down (no cleanup needed)"
+        ;;
+    *)
+        # Other actions (pre-up, pre-down, etc.) - ignore
+        exit 0
+        ;;
+esac
+
+exit 0
