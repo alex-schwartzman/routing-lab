@@ -197,13 +197,23 @@ scp asusrouter/config/* root@192.168.10.1:/etc/config/
 
 ### 3. Deploy sweet (Android)
 ```bash
-# Unlock bootloader and reflash to AOSP
+# Unlock bootloader and reflash to a de-googled AOSP
 # You will lose all security features of Android, but you'll get all the hardware control
 # Provided that it is not your mobile phone anymore, but just a router with display
 # which stays in the drawer, it is an acceptable compromise
 
 # Install Tailscale (available as downloadable APK, from Aurora Store, or from F-Droid)
 # Configure as exit node or regular client
+  # Configure WiFi hotspot
+  # Use Termux to configure routing exceptions for hotspot clients
+  # By default, Tailscale uses "all-in" mode which routes ALL traffic into the VPN tunnel
+  # This breaks hotspot functionality - replies to hotspot clients get routed into Tailscale
+  # instead of back to the hotspot interface
+  # Solution: Add policy routing rules to exclude hotspot subnet from Tailscale routing table
+
+  # Example Termux commands (requires root):
+  # ip rule add from 192.168.43.0/24 lookup main priority 100
+  # (Adjust subnet to match your hotspot's IP range)
 ```
 
 ---
@@ -270,11 +280,12 @@ This setup demonstrates that robust, redundant VPN infrastructure doesn't requir
 - Devices reconnect to sweet hotspot
 - Downtime: ~5 minutes (manual WiFi reconnect)
 
-### Use Case 2: Router Failure
-- dyckymost SD card corrupts
-- asusrouter continues operating with local WireGuard tunnel
-- No reconfiguration needed (automatic failover via routing metrics)
-- Downtime: 0 seconds (seamless failover)
+  ### Use Case 2: Tailscale Failure
+  - Tailscale exit node on dyckymost goes down (but dyckymost still running)
+  - asusrouter traffic automatically fails over to dyckymost's 
+  - No reconfiguration needed (automatic failover via routing metrics)
+  - Downtime: 0 seconds (seamless policy routing failover)
+
 
 ### Use Case 3: Travel
 - Take sweet to cafe
@@ -288,6 +299,13 @@ This setup demonstrates that robust, redundant VPN infrastructure doesn't requir
 - Kill switch prevents leaks if VPN fails
 - Policy routing ensures WiFi clients ONLY use WireGuard
 - No direct ISP access possible (nftables blocks it)
+
+### Use Case 5: Both VPN Tunnels Fail on dyckymost
+- Both prague0 (WireGuard) and tailscale0 fail on dyckymost (but hardware still running)
+- dyckymost WiFi clients (wlan0) lose connectivity - kill switch activates (privacy protection)
+- asusrouter runs mini-mwan tool which will detect failing wan and fail over to asusrouter's local surfshark0 WireGuard tunnel
+- Downtime: 30 seconds for asusrouter clients (mini-mwan pings its destinations twice a minute)
+- dyckymost WiFi clients must manually reconnect to asusrouter WiFi to restore connectivity
 
 ---
 
