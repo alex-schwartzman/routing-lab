@@ -39,7 +39,7 @@ The network uses advanced Linux routing (policy routing, multiple VPN tunnels, a
 **Firmware:** OpenWRT 24.10.2 (flashed from stock)
 
 **Role:**
-- LAN router for primary devices (MacBook, iPhone, etc.)
+- LAN router for primary devices (Hostimil, Bolemir, etc.)
 - Independent WireGuard tunnel (backup path)
 - Dual-WAN failover (primary via dyckymost, backup via local WireGuard)
 - Operates standalone when dyckymost fails

@@ -16,8 +16,8 @@ Raspberry Pi 4 Model B Rev 1.5 running Debian 12 (Bookworm)
 ### NetworkManager
 - `NetworkManager/system-connections/hotspot.nmconnection` - WiFi hotspot (password redacted)
 - `NetworkManager/conf.d/dns.conf` - Use dnsmasq for system DNS
-- `NetworkManager/dnsmasq-shared.d/split.conf` - Split DNS for hotspot clients
-- `NetworkManager/dnsmasq.d/split.conf` - Split DNS for system
+- `NetworkManager/dnsmasq-shared.d/split.conf` - DNS config for edge instances (wlan0, eth1)
+- `NetworkManager/dnsmasq.d/split.conf` - DNS config for master resolver (127.0.0.1)
 - `NetworkManager/dispatcher.d/99-local-routing` - Interface state change handler
 
 ### Custom Scripts
@@ -42,7 +42,10 @@ Raspberry Pi 4 Model B Rev 1.5 running Debian 12 (Bookworm)
 
 - **Console-only boot** (multi-user.target, no GUI)
 - **Policy routing** with automatic failover (prague0 ↔ tailscale0)
-- **Split DNS** (asusnet, raspinet, tailscale domains)
+- **"Chain of Irresponsibility" DNS** - 3 dnsmasq instances with hierarchical forwarding
+  - Master resolver (127.0.0.1) holds static hosts + central cache
+  - Edge instances (wlan0, eth1) serve DHCP leases + forward to master
+  - Split domain forwarding (asusnet, raspinet, tailscale)
 - **Kill switch** prevents traffic leaks when VPN fails
 - **MSS clamping** for MTU 1380 WireGuard tunnel
 - **Automated backups** with rsnapshot (30-day retention)

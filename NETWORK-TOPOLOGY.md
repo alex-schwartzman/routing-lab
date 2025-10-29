@@ -1,7 +1,7 @@
 # Network Topology & Configuration Documentation
 
-**Last Updated:** 2025-10-26
-**Status:** Fully operational after IPv6 removal and routing fixes
+**Last Updated:** 2025-10-29
+**Status:** Fully operational with DNS "Chain of Irresponsibility" architecture
 
 ---
 
@@ -11,7 +11,7 @@
 ```
 ┌─────────────────┐
 │   asusrouter    │ OpenWRT 24.10.2
-│ 192.168.10.1/24 │ LAN clients (MacBook, iPhone, etc)
+│ 192.168.10.1/24 │ LAN clients (Hostimil, Bolemir, etc)
 └────────┬────────┘
          │ wan: 192.168.68.158/24
          │
@@ -445,37 +445,58 @@ table inet filter {
 
 ## DNS Configuration
 
-### Split DNS Architecture
+### Architecture: "Chain of Irresponsibility" Pattern
 
-The network uses split DNS to allow seamless name resolution across multiple domains:
+NetworkManager runs **three separate dnsmasq instances** on dyckymost, implementing a hierarchical DNS architecture where edge servers delegate to a central resolver.
 
-**dyckymost (raspinet domain):**
-- Local domain: `raspinet`
-- Resolves local WiFi clients and dyckymost hostnames
-- Forwards `tail55bdec.ts.net` queries to Tailscale DNS (100.100.100.100)
-- Forwards `asusnet` queries to asusrouter (192.168.10.1) - **planned**
-- Falls back to public DNS (8.8.8.8, 1.1.1.1)
+**Key Design Decision:** NetworkManager provides `--conf-dir` for each dnsmasq instance but doesn't allow per-interface configs. Both wlan0 and eth1 read from the same `dnsmasq-shared.d/` directory, making it impossible to have different authoritative zones per interface.
 
-**asusrouter (asusnet/lan domain):**
-- Local domain: `lan` (also called `asusnet`)
-- Resolves local LAN clients on 192.168.10.0/24
-- Forwards `raspinet` queries to dyckymost (192.168.68.1) - **planned**
-- Forwards `tail55bdec.ts.net` queries to dyckymost - **planned**
-- Uses Surfshark DNS (162.252.172.57, 149.154.159.92) for WireGuard
+### Domain-to-Network Authoritative Mapping
 
-### dnsmasq (for wlan0 hotspot on dyckymost)
+**⚠️ Important:** The `.raspinet` domain has **split authority** across two separate networks, each with its own authoritative DNS server. This is architecturally irregular but functionally acceptable.
 
-**Managed by:** NetworkManager
-**Config:** `/etc/NetworkManager/dnsmasq-shared.d/split.conf`
+| Domain | Network | Authoritative DNS | DHCP Server | Primary Devices |
+|--------|---------|-------------------|-------------|-----------------|
+| **asusnet** | 192.168.10.0/24 | 192.168.10.1 (asusrouter) | asusrouter | Hostimil, Bolemir, LAN clients |
+| **raspinet** (primary) | 192.168.54.0/24 | 192.168.54.1 (dyckymost wlan0) | dyckymost wlan0 | WiFi hotspot clients, mobile devices |
+| **raspinet** (hidden) | 192.168.68.0/24 | 192.168.68.1 (dyckymost eth1) | dyckymost eth1 | asusrouter WAN interface only |
+
+**Split Authority Implications:**
+
+- **asusnet**: Clean single authority - asusrouter dnsmasq knows all DHCP clients on 192.168.10.0/24
+- **raspinet (primary)**: 192.168.54.1 serves WiFi clients - this is the "main" `.raspinet` zone
+- **raspinet (hidden)**: 192.168.68.0/24 shares the `.raspinet` domain but is isolated:
+  - Only asusrouter.raspinet exists here (single DHCP client)
+  - Clients on 192.168.54.0/24 **cannot** resolve names from 192.168.68.0/24
+  - This segment is effectively "hidden" from the primary raspinet zone
+  - Considered **unusable for general DHCP clients** due to domain overlap
+
+**Why This Configuration:**
+
+NetworkManager's constraint (shared `dnsmasq-shared.d/` config for both wlan0 and eth1) prevents assigning different domains per interface. Both must use `domain=raspinet`, creating split authority.
+
+**Design Decision:** Accept the limitation. The eth1 network (192.168.68.0/24) is infrastructure-only (asusrouter WAN), so having limited DNS visibility is acceptable.
+
+### Three dnsmasq Instances
+
+#### 1. **127.0.0.1:53** - Master Resolver (Local Queries)
+**Purpose:** DNS resolver for dyckymost itself and fallback for edge instances
+**Config:** `/etc/NetworkManager/dnsmasq.d/split.conf`
+**Clients:** dyckymost localhost, wlan0/eth1 dnsmasq instances (as upstream)
 
 **Configuration:**
 ```conf
-# Local domain - dnsmasq is authoritative
-local=/raspinet/
 domain=raspinet
+
+# Static infrastructure hosts (not DHCP clients)
+host-record=dyckymost.raspinet,192.168.54.1
+host-record=dyckymost,192.168.54.1
 
 # Forward Tailscale domain to Tailscale DNS
 server=/tail55bdec.ts.net/100.100.100.100
+
+# Forward asusnet domain to asusrouter
+server=/asusnet/192.168.68.158
 
 # Default fallback public DNS
 server=8.8.8.8
@@ -484,12 +505,127 @@ server=1.1.1.1
 no-resolv
 ```
 
-**DNS Resolution Flow (from WiFi clients):**
-1. `*.raspinet` → dnsmasq local records (DHCP hostnames)
-2. `*.tail55bdec.ts.net` → 100.100.100.100 (Tailscale MagicDNS)
-3. Everything else → 8.8.8.8, 1.1.1.1 (public DNS)
+**Responsibilities:**
+- Serves static `host-record` entries for infrastructure (dyckymost itself)
+- Centralized cache for all internet DNS queries
+- Forwards specialized domains (Tailscale, asusnet)
+- Falls back to public DNS (8.8.8.8, 1.1.1.1)
 
-**Note:** `filter-aaaa` option was removed (caused dnsmasq to fail on startup).
+#### 2. **192.168.54.1:53** - WiFi Hotspot (wlan0)
+**Purpose:** DNS + DHCP server for WiFi clients
+**Config:** `/etc/NetworkManager/dnsmasq-shared.d/split.conf`
+**Clients:** WiFi hotspot clients (192.168.54.0/24)
+
+**Configuration:**
+```conf
+domain=raspinet
+server=127.0.0.1
+no-resolv
+```
+
+**Responsibilities:**
+- Serves DHCP leases for wlan0 (192.168.54.10-254)
+- Resolves `.raspinet` names from its DHCP leases
+- Forwards everything else → 127.0.0.1
+
+#### 3. **192.168.68.1:53** - eth1 Network
+**Purpose:** DNS + DHCP server for eth1 network (asusrouter)
+**Config:** `/etc/NetworkManager/dnsmasq-shared.d/split.conf` (shared with wlan0)
+**Clients:** eth1 network devices (192.168.68.0/24)
+
+**Configuration:** Same as wlan0 (both use `dnsmasq-shared.d/`)
+
+**Responsibilities:**
+- Serves DHCP leases for eth1 (192.168.68.10-254)
+- Resolves `.raspinet` names from its DHCP leases
+- Forwards everything else → 127.0.0.1
+
+### DNS Resolution Flow
+
+**Example 1: WiFi client queries `google.com`**
+```
+Client (192.168.54.195)
+  ↓ Query: google.com
+192.168.54.1 (wlan0 dnsmasq)
+  ↓ Not a DHCP lease → forward to 127.0.0.1
+127.0.0.1 (master dnsmasq)
+  ↓ Check cache → MISS
+  ↓ Forward to 8.8.8.8
+Google DNS
+  ↓ Returns IP
+127.0.0.1 caches result
+  ↓
+192.168.54.1 caches result
+  ↓
+Client receives IP
+```
+
+**Example 2: WiFi client queries `Hostimil.raspinet`**
+```
+Client (192.168.54.195)
+  ↓ Query: Hostimil.raspinet
+192.168.54.1 (wlan0 dnsmasq)
+  ↓ Check DHCP leases → FOUND (192.168.54.195)
+  ↓ Authoritative answer
+Client receives IP (no upstream query needed)
+```
+
+**Example 3: dyckymost queries `Hostimil.raspinet`**
+```
+dyckymost localhost
+  ↓ Query: Hostimil.raspinet
+127.0.0.1 (master dnsmasq)
+  ↓ Not in static hosts → not found
+  ↓ Would fall through to 8.8.8.8 → NXDOMAIN
+Client receives NXDOMAIN
+```
+**Note:** 127.0.0.1 cannot resolve DHCP clients from wlan0/eth1 because there's no forwarding from master to edge instances.
+
+### Architectural Tradeoffs & Design Decisions
+
+#### ✅ Benefits of "Chain of Irresponsibility"
+
+1. **Centralized caching:** All internet DNS queries cached once at 127.0.0.1, shared benefit across all interfaces
+2. **Single source of truth:** Static hosts defined in one config file (`dnsmasq.d/split.conf`)
+3. **Simplified management:** Only edit localhost config for infrastructure changes
+4. **Two-level caching:** Edge instances cache their own queries, master caches everything else
+
+#### ❌ Limitations
+
+1. **Single point of failure:** If 127.0.0.1 dnsmasq crashes, wlan0/eth1 lose internet DNS (hence "irresponsibility")
+2. **Extra latency:** ~1-5ms added per query (minimal in practice, all local)
+3. **No cross-interface DHCP resolution:** 127.0.0.1 cannot resolve DHCP clients from wlan0/eth1
+4. **NetworkManager constraints:** Cannot assign different `conf-dir` per interface, limiting architectural options
+
+#### Why Not Cross-Interface DNS Forwarding?
+
+**Attempted approach:** Configure 127.0.0.1 to forward `.raspinet` queries to both 192.168.54.1 and 192.168.68.1.
+
+**Why it failed:**
+1. Without `local=/raspinet/`, edge instances forward unknown `.raspinet` queries to public DNS (8.8.8.8)
+2. Public DNS returns NXDOMAIN, which 127.0.0.1 accepts without trying the next server
+3. With `local=/raspinet/`, edge instances return **authoritative** NXDOMAIN immediately
+4. 127.0.0.1 receives authoritative NXDOMAIN and stops (doesn't try next server)
+5. dnsmasq's `all-servers` directive queries all servers but returns **first response** (race condition, not "first positive response")
+
+**Conclusion:** NetworkManager's shared config directory + dnsmasq's forwarding semantics make cross-interface DHCP resolution architecturally impossible without running a custom dnsmasq instance.
+
+#### Why Public DNS (8.8.8.8, 1.1.1.1) Over Surfshark DNS?
+
+**Consideration:** Surfshark provides Prague-based DNS servers when using prague0 tunnel. Theoretically closer = faster.
+
+**Decision:** Use anycast public DNS (Google, Cloudflare) instead.
+
+**Reasoning:**
+1. **Multi-WAN compatibility:** dyckymost has multiple exit points (prague0, tailscale0)
+   - prague0 active → Surfshark Prague DNS optimal
+   - tailscale0 active → Surfshark Prague DNS suboptimal (exit node could be anywhere)
+2. **Anycast handles routing:** 8.8.8.8/1.1.1.1 automatically connect to nearest edge node regardless of exit point
+3. **Latency difference minimal:** ~15-25ms extra from Prague vs Surfshark DNS (negligible)
+4. **GeoDNS still works:** CDNs return nodes close to the exit point, not DNS server location
+5. **Simplicity:** No need for dynamic DNS switching based on active tunnel
+
+**Trade-off accepted:** Slightly higher DNS latency (~20-30ms vs ~5ms) for architectural simplicity and multi-WAN reliability.
 
 ### dnsmasq (on asusrouter)
 
@@ -498,14 +634,14 @@ no-resolv
 
 **Configuration:**
 ```conf
-domain=lan
-local=/lan/
+domain=asusnet
+local=/asusnet/
 authoritative=1
 filter_aaaa=1
 ```
 
 **DNS Resolution Flow (from asusrouter LAN clients):**
-1. `*.lan` → dnsmasq local records (DHCP hostnames)
+1. `*.asusnet` → dnsmasq local records (DHCP hostnames)
 2. Everything else → upstream via wan (dyckymost) or Surfshark DNS
 
 ---
@@ -648,7 +784,7 @@ ip -6 addr show
 sudo rsnapshot daily
 ```
 
-**Disaster recovery (SD card on MacBook):**
+**Disaster recovery (SD card on Hostimil):**
 ```bash
 # Mount SD card
 cd /Volumes/rootfs/backup/daily.0/localhost/
@@ -1090,15 +1226,15 @@ wan → dyckymost eth0 → Internet 🇨🇿
 - **Open Ports:** SSH (22), HTTP (80)
 
 **DNS Configuration:**
-- **Local Domain:** lan
+- **Local Domain:** asusnet
 - **dnsmasq:** Provides DHCP + DNS for 192.168.10.0/24
 - **Upstream DNS:** Uses wan (dyckymost) or Surfshark DNS servers
 - **Filter:** IPv6 AAAA records filtered (filter_aaaa=1)
 
 **Active LAN Clients:**
-- MacBookPro (192.168.10.243)
+- Hostimil (192.168.10.243)
 - Mac (192.168.10.236)
-- iPhone-13 (192.168.10.129)
+- Bolemir (192.168.10.129)
 - Zenfone-10 (192.168.10.131)
 - 2 unnamed devices (.247, .206)
 
@@ -1202,6 +1338,58 @@ watch -n 1 'sudo conntrack -L | grep 192.168.54.119'
 - WireGuard no reply → Restarted tunnel (endpoint changed)
 - Hotspot not broadcasting → Fixed dnsmasq config
 - Traffic not routing via prague0 → Fixed forward chain rules
+
+### 2025-10-29: DNS Architecture Redesign - "Chain of Irresponsibility"
+
+**Problem Identified:**
+- dyckymost could not resolve its own hostname `dyckymost.raspinet`
+- NetworkManager's dnsmasq instances run with `--no-hosts` flag, ignoring `/etc/hosts`
+
+**Root Cause Analysis:**
+- NetworkManager runs 3 separate dnsmasq instances (127.0.0.1, 192.168.54.1, 192.168.68.1)
+- Each instance has isolated state (no shared DHCP lease information)
+- Both wlan0 and eth1 use the same `--conf-dir=/etc/NetworkManager/dnsmasq-shared.d`
+- Cannot configure different authoritative zones per interface due to shared config
+
+**Architectural Decisions:**
+
+1. **"Chain of Irresponsibility" Pattern Implemented:**
+   - 127.0.0.1 (master) → holds static hosts, forwards to public DNS
+   - 192.168.54.1 & 192.168.68.1 (edge) → serve DHCP leases, forward everything else to 127.0.0.1
+   - Centralized caching at master level
+   - Single source of truth for static infrastructure hosts
+
+2. **Cross-Interface DNS Forwarding Abandoned:**
+   - Attempted: Configure 127.0.0.1 to forward `.raspinet` to both edge instances
+   - Failed due to: dnsmasq forwarding semantics (authoritative NXDOMAIN stops forwarding chain)
+   - Accepted limitation: localhost cannot resolve DHCP clients from wlan0/eth1
+
+3. **Public DNS Choice (8.8.8.8, 1.1.1.1):**
+   - Evaluated: Surfshark Prague DNS (closer, ~5ms) vs anycast public DNS (~25ms)
+   - Decided: Public DNS for multi-WAN compatibility
+   - Reasoning: tailscale0 failover makes Surfshark Prague DNS suboptimal when not using prague0
+   - Trade-off: ~20ms extra latency for architectural simplicity
+
+**Changes:**
+1. ✅ Added `host-record` entries for dyckymost to `/etc/NetworkManager/dnsmasq.d/split.conf`
+2. ✅ Configured edge instances to forward to 127.0.0.1 only (no direct public DNS access)
+3. ✅ Documented NetworkManager architectural constraints
+4. ✅ Explained DNS forwarding semantics and why cross-interface resolution is impossible
+
+**Verified Working:**
+- ✅ Static hosts resolve from all dnsmasq instances
+- ✅ DHCP clients resolve their own hostnames
+- ✅ WiFi clients can query internet DNS via chain (wlan0 → 127.0.0.1 → 8.8.8.8)
+- ✅ Centralized DNS caching at master level
+
+**Configuration Files:**
+- `/etc/NetworkManager/dnsmasq.d/split.conf` - master resolver config
+- `/etc/NetworkManager/dnsmasq-shared.d/split.conf` - edge instances config
+
+**Accepted Limitations:**
+- 127.0.0.1 cannot resolve DHCP clients from wlan0/eth1 (by design)
+- Single point of failure: 127.0.0.1 crash breaks internet DNS for edge instances
+- ~1-5ms extra latency per query due to forwarding hop
 
 ---
 
