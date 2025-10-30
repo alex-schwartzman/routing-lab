@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+
+set -e
+
+IFACE="$1"
+ACTION="$2"  # up, down, dhcp4-change, etc.
+
+if [ -z "$IFACE" ]; then
+    echo "Usage: $0 <interface> <action>" >&2
+    exit 1
+fi
+
+# String comparison, not numeric
+if [ "$IFACE" != "eth0" ]; then
+    echo "Not interested in $IFACE"
+    exit 0
+fi
+
+# Only process on interface up
+if [ "$ACTION" != "up" ] && [ "$ACTION" != "dhcp4-change" ]; then
+    exit 0
+fi
+
+# Get the local IP address assigned to eth0
+LOCALIP=$(ip -4 addr show dev "$IFACE" 2>/dev/null | awk '/inet / {print $2}' | cut -d'/' -f1)
+
+if [ -z "$LOCALIP" ]; then
+    echo "No local IP found for interface $IFACE" >&2
+    exit 0
+fi
+
+echo "Processing interface $IFACE with IP $LOCALIP"
+
+# Remove old rules if they exist (idempotency)
+ip rule del from "$LOCALIP" lookup tailscale priority 5270 2>/dev/null || true
+ip rule del from "$LOCALIP" lookup prague priority 5280 2>/dev/null || true
+ip rule del from "$LOCALIP" unreachable priority 5290 2>/dev/null || true
+
+# Add failover rules
+ip rule add from "$LOCALIP" lookup tailscale priority 5270
+ip rule add from "$LOCALIP" lookup prague priority 5280
+ip rule add from "$LOCALIP" unreachable priority 5290
+
+echo "Failover routing configured for $LOCALIP"
+
+exit 0
