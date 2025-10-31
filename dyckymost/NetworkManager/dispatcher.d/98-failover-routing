@@ -1,4 +1,18 @@
 #!/usr/bin/env bash
+#
+# NetworkManager Dispatcher Script: Failover Routing for Local Traffic
+#
+# Purpose: Automatically configure policy routing rules for traffic originating
+#          from dyckymost itself (not forwarded traffic from clients)
+#
+# Failover chain:
+#   1. Try Tailscale (priority 5270)
+#   2. Fallback to WireGuard prague0 (priority 5280)
+#   3. Kill switch - block traffic (priority 5290)
+#
+# Installation: Place in /etc/NetworkManager/dispatcher.d/ and chmod +x
+# Triggered on: eth0 up, dhcp4-change
+#
 
 set -e
 
@@ -42,5 +56,10 @@ ip rule add from "$LOCALIP" lookup prague priority 5280
 ip rule add from "$LOCALIP" unreachable priority 5290
 
 echo "Failover routing configured for $LOCALIP"
+
+ip rule del to 100.64.0.0/10 lookup tailscale priority 5250
+ip rule add to 100.64.0.0/10 lookup tailscale priority 5250
+
+echo "Tailscale mesh connected for all clients"
 
 exit 0

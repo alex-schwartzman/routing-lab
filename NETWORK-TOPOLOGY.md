@@ -141,8 +141,9 @@ ip rule show
 | 5250     | from all fwmark 0x80000/0xff0000     | unreachable     | Tailscale fwmark blackhole        |
 | 5260     | from 192.168.54.0/24                 | lookup prague   | WiFi clients → prague0 (PRIMARY)  |
 | 5270     | from all                              | lookup tailscale| Default → tailscale0              |
-| 5280     | from all                              | lookup prague   | Failover → prague0 (if tailscale down) |
-| 5300     | from all                              | lookup prague   | Failover → prague0 (redundant)    |
+| 5270     | from 192.168.1.38                     | lookup tailscale| Local traffic → tailscale (PRIMARY) |
+| 5280     | from 192.168.1.38                     | lookup prague   | Local traffic → prague0 (FAILOVER) |
+| 5290     | from 192.168.1.38                     | unreachable     | Local traffic kill switch         |
 | 32766    | from all                              | lookup main     | Fallback                          |
 | 32767    | from all                              | lookup default  | Final fallback                    |
 
@@ -363,19 +364,29 @@ table inet mangle {
 
 ### WireGuard Packet Marking
 
-**Purpose:** Mark WireGuard handshake packets (UDP port 51820) so they route via eth0, not prague0 (avoid loop).
+**Purpose:** Mark WireGuard packets (UDP port 51820) so they route via eth0, not via Tailscale or prague0 (avoid loops).
 
-**Rules:**
+**WireGuard FwMark (Locally Generated):**
+Set in `/etc/wireguard/prague0.conf`:
+```ini
+FwMark = 0x100000
+```
+This marks packets **at socket creation** before routing decision, ensuring WireGuard protocol packets from dyckymost itself always route via main table → eth0.
+
+**Mangle PREROUTING (Forwarded from eth1):**
 ```nft
-table inet wgmark {
-    chain output {
-        type route hook output priority 100; policy accept;
-        udp dport 51820 meta mark set meta mark & 0xff00ffff | 0x00100000 counter comment "wgmark-prague0"
+table inet mangle {
+    chain prerouting {
+        type filter hook prerouting priority mangle; policy accept;
+        iifname "eth1" udp dport 51820 meta mark set 0x00100000 counter comment "Mark eth1 WG traffic"
     }
 }
 ```
+Marks forwarded WireGuard traffic from eth1 (asusrouter clients) **at mangle priority** (before conntrack NAT) to route via main table → eth0 directly, bypassing Tailscale.
 
 **fwmark:** 0x100000 (used in `ip rule` priority 105)
+
+**Why mangle priority?** Marking at mangle priority (-150) happens **before** conntrack NAT processing (-100), preventing interference with NAT state tracking. Previous implementation marked packets at NAT priority (dstnat), which caused conntrack conflicts resulting in every-second-packet drops.
 
 ### NAT / Masquerading
 
@@ -1390,6 +1401,87 @@ watch -n 1 'sudo conntrack -L | grep 192.168.54.119'
 - 127.0.0.1 cannot resolve DHCP clients from wlan0/eth1 (by design)
 - Single point of failure: 127.0.0.1 crash breaks internet DNS for edge instances
 - ~1-5ms extra latency per query due to forwarding hop
+
+### 2025-10-30: Critical Conntrack Bug Fix - Every-Second-Packet Drop Issue
+
+**Problem Identified:**
+- eth1 → eth0 WireGuard traffic experiencing alternating packet loss (every odd packet works, every even packet fails)
+- Conntrack entries staying in [UNREPLIED] state, getting [DESTROY]ed after 2-3 seconds
+- Pattern: NEW → UPDATE → DESTROY → NEW → UPDATE → DESTROY (continuous cycle)
+
+**Root Cause Analysis:**
+
+1. **Double NAT Problem:**
+   - Two NAT rules applied to same traffic: mark-based masquerade (handle 9) AND NetworkManager masquerade (nm-shared-eth1)
+   - Only 6 packets matched mark-based rule, 101 packets fell through to NetworkManager NAT
+   - Inconsistent NAT handling created conntrack confusion
+
+2. **NAT Priority Conflict:**
+   - PREROUTING mark rule in NAT table at priority dstnat
+   - Conntrack NAT un-NAT also happens at priority dstnat
+   - Marking and conntrack processing **interfered with each other**
+   - Reply packets couldn't be properly un-NAT'd back to original source
+
+3. **Why Alternating Packets?**
+   - **Packet 1 (ODD):** Creates [NEW] conntrack entry → forwarded (NEW entries always allowed)
+   - **Packet 2 (EVEN):** Uses existing [UNREPLIED] entry → conntrack treats as potentially invalid → dropped or misrouted
+   - **Packet 3 (ODD):** Old entry [DESTROY]ed, creates NEW entry again → works
+   - Deterministic pattern due to regular packet intervals (< UDP unreplied timeout)
+
+**Changes Made:**
+
+1. ✅ **Removed problematic NAT rules:**
+   - Deleted PREROUTING mark rule (handle 3) from NAT table
+   - Deleted POSTROUTING mark-based masquerade (handle 9) from NAT table
+   - Left only NetworkManager's masquerade (single NAT path)
+
+2. ✅ **Added mangle PREROUTING marking:**
+   ```nft
+   chain prerouting {
+       type filter hook prerouting priority mangle;
+       iifname "eth1" udp dport 51820 meta mark set 0x100000
+   }
+   ```
+   - Marks at **mangle priority (-150)** - runs **before** conntrack NAT (-100)
+   - No interference with conntrack state tracking
+   - Only marks **outbound** packets (dport 51820), not replies (sport 51820)
+
+3. ✅ **Fixed WireGuard PostUp:**
+   - **Removed:** `ip rule add from all table prague priority 5300`
+   - This rule was routing ALL traffic (including eth1→eth0 forwarded traffic) through prague0
+   - Caused original routing conflicts before conntrack issue was discovered
+
+4. ✅ **Added FwMark to WireGuard config:**
+   - `FwMark = 0x100000` in `/etc/wireguard/prague0.conf`
+   - Marks WireGuard's own protocol packets at socket creation
+   - Ensures correct source IP selection (192.168.1.38 instead of Tailscale IP)
+
+5. ✅ **Added local traffic failover:**
+   - NetworkManager dispatcher script: `/etc/NetworkManager/dispatcher.d/98-failover-routing`
+   - Automatically adds rules for dyckymost's own traffic:
+     - Priority 5270: from 192.168.1.38 lookup tailscale (PRIMARY)
+     - Priority 5280: from 192.168.1.38 lookup prague (FAILOVER)
+     - Priority 5290: from 192.168.1.38 unreachable (KILL SWITCH)
+
+**Verified Working:**
+- ✅ Conntrack entries now reach [ASSURED] state
+- ✅ No more [DESTROY] cycles
+- ✅ All packets passing through consistently
+- ✅ Replies properly un-NAT'd to eth1 clients
+- ✅ Traffic from eth1 → eth0 works via NetworkManager NAT
+
+**Key Learnings:**
+1. **Mangle priority matters:** Marking must happen **before** conntrack NAT processing
+2. **Single NAT path:** Avoid multiple masquerade rules for same traffic
+3. **Conntrack UDP behavior:** [UNREPLIED] entries create deterministic failure patterns
+4. **FwMark placement:** Socket creation (WireGuard config) vs packet marking (nftables) have different effects on source IP selection
+5. **Policy routing conflicts:** "from all" rules can inadvertently catch forwarded traffic
+
+**Configuration Files Updated:**
+- `/etc/wireguard/prague0.conf` - Added FwMark, removed priority 5300 rule
+- `/etc/nftables.conf` - Added mangle prerouting chain, removed problematic NAT rules
+- `/etc/NetworkManager/dispatcher.d/98-failover-routing` - Added local traffic failover
+- Documentation updated to reflect actual working configuration
 
 ---
 
