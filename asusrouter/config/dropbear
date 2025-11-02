@@ -1,0 +1,8 @@
+
+config dropbear
+	option PasswordAuth 'off'
+	option RootPasswordAuth 'off'
+	option Port '22'
+	option Additional '-p 0.0.0.0:22'
+	option listen_address '0.0.0.0'
+
